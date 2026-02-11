@@ -1,7 +1,6 @@
 #!/bin/bash
-# --- Sulap Radio BlackTools Installer (Fixed Version) ---
+# --- Sulap Radio BlackTools Installer (STABLE) ---
 
-# Text Colors
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
 BOLD='\033[1m'
@@ -12,23 +11,29 @@ echo -e "${BLUE}==========================================${NC}"
 echo -e "${GREEN}    SULAP RADIO CUSTOM INSTALLER          ${NC}"
 echo -e "${BLUE}==========================================${NC}"
 
-# 1. Dependency Check (The part that caused the error)
-echo -e "${BLUE}==>${NC} Detected System: Ubuntu"
+# 1. Dependency Check
 echo -e "${BLUE}==>${NC} Installing dependencies..."
 sudo apt-get update -qq && sudo apt-get install -y gcc make curl git tcl tcl-dev -qq
 
-# 2. Interactive Questions
+# 2. Interactive Questions (CLEANED UP)
 echo -e "${BLUE}==>${NC} Configuration Settings"
-read -p "Enter Bot Nickname [sulap_bot]: " BOTNAME
+printf "Enter Bot Nickname [sulap_bot]: "
+read BOTNAME
 BOTNAME=${BOTNAME:-sulap_bot}
-read -p "Enter IRC Server [vancouver.bc.ca.undernet.org]: " SERVER
+
+printf "Enter IRC Server [vancouver.bc.ca.undernet.org]: "
+read SERVER
 SERVER=${SERVER:-vancouver.bc.ca.undernet.org}
-read -p "Enter Home Channel [#bislig]: " HOMECHAN
+
+printf "Enter Home Channel [#bislig]: "
+read HOMECHAN
 HOMECHAN=${HOMECHAN:-#bislig}
 
-# 3. Build Eggdrop
+# 3. Setup Directories
 BOTDIR="$HOME/$BOTNAME"
-echo -e "${BLUE}==>${NC} Building Eggdrop in $BOTDIR..."
+echo -e "${BLUE}==>${NC} Building Eggdrop in: $BOTDIR"
+
+# 4. Build Eggdrop
 cd $HOME
 wget -q https://ftp.eggheads.org/pub/eggdrop/source/1.10/eggdrop-1.10.1.tar.gz
 tar -zxf eggdrop-1.10.1.tar.gz
@@ -38,14 +43,15 @@ make config >/dev/null 2>&1
 make -j$(nproc) >/dev/null 2>&1
 make install >/dev/null 2>&1
 
-# 4. Install BlackTools
-echo -e "${BLUE}==>${NC} Cloning BlackTools from BlackShadow..."
-cd $BOTDIR
-git clone https://github.com/PHTLabs/BlackTools.git scripts/BlackTools >/dev/null
-cp scripts/BlackTools/BlackTools.tcl scripts/BlackTools.tcl
+# 5. Install BlackTools (Public Repo Fix)
+echo -e "${BLUE}==>${NC} Cloning BlackTools..."
+mkdir -p $BOTDIR/scripts
+cd $BOTDIR/scripts
+git clone https://github.com/PHTLabs/BlackTools.git >/dev/null 2>&1
+cp BlackTools/BlackTools.tcl $BOTDIR/scripts/BlackTools.tcl
 
-# 5. Build the Config file
-cat > "$BOTNAME.conf" <<EOF
+# 6. Build Config
+cat > "$BOTDIR/$BOTNAME.conf" <<EOF
 set nick "$BOTNAME"
 set altnick "$BOTNAME-"
 set realname "https://sulapradio.com"
@@ -61,11 +67,10 @@ source eggdrop.conf
 source scripts/BlackTools.tcl
 EOF
 
-# 6. Shortcut Alias
-# Check if alias already exists to avoid duplicates
+# 7. Shortcut Alias
 if ! grep -q ".egg" ~/.bashrc; then
     echo "alias .egg='cd $BOTDIR && ./eggdrop -m $BOTNAME.conf'" >> ~/.bashrc
 fi
 
-echo -e "\n${GREEN}✅ INSTALLATION COMPLETE!${NC}"
-echo -e "Type ${BLUE}source ~/.bashrc${NC} then ${BLUE}.egg${NC} to start your bot."
+echo -e "\n${GREEN}✅ INSTALLATION FINISHED SUCCESSFULLY!${NC}"
+echo -e "Type ${BLUE}source ~/.bashrc${NC} then ${BLUE}.egg${NC} to start."

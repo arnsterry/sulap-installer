@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------------------------------
-# Sulap Installer (Eggdrop + BlackTools) - Armour-inspired
+# Sulap Installer (Eggdrop + BlackTools) - Armour-style auto prerequisites
 # --------------------------------------------------------------------------------------------
 # Usage:
 #   ./install.sh -i                     Install a NEW bot (build eggdrop, install BlackTools, write config)
@@ -8,11 +8,6 @@
 #   ./install.sh -l                     Load BlackTools into an existing bot config (no rebuild)
 #   ./install.sh -f <file> [-y]         Deploy from a deploy file (non-interactive), optional auto-start
 #   ./install.sh -h | --help            Help
-#
-# Notes:
-#   - Primary support: Debian/Ubuntu (apt-get). Basic dnf/yum support included.
-#   - Installs BlackTools into: <BOTDIR>/scripts/BlackTools.tcl
-#   - Writes config: <BOTDIR>/<BOTNAME>.conf
 # --------------------------------------------------------------------------------------------
 
 set -euo pipefail
@@ -62,13 +57,30 @@ prompt_default() {
   if [[ -r /dev/tty ]]; then
     read -r -p "$prompt [$def]: " out </dev/tty || true
   else
-    # no TTY (fully non-interactive) -> use defaults
     out=""
   fi
   if [[ -z "$out" ]]; then printf "%s" "$def"; else printf "%s" "$out"; fi
 }
 
 ensure_dir() { [[ -d "$1" ]] || mkdir -p "$1"; }
+
+# --------------------------
+# sudo handling (ask once)
+# --------------------------
+SUDO="sudo"
+ensure_sudo() {
+  if [[ "$(id -u)" -eq 0 ]]; then
+    SUDO=""
+    return 0
+  fi
+  need_cmd sudo
+  ohai "Requesting sudo (you may be prompted once)..."
+  sudo -v
+  # keep sudo alive while script runs
+  ( while true; do sudo -n true 2>/dev/null || true; sleep 30; done ) &
+  SUDO_KEEPALIVE_PID=$!
+  trap '[[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null || true' EXIT
+}
 
 # --------------------------
 # OS / package manager detect
@@ -79,21 +91,30 @@ PACKAGES=()
 
 detect_system() {
   if [[ "$(uname -s)" != "Linux" ]]; then
-    die "This installer currently supports Linux only (Debian/Ubuntu recommended)."
+    die "This installer currently supports Linux only."
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
     SYSTEM="Debian/Ubuntu"
-    PKG_INSTALL="sudo apt-get update -qq && sudo apt-get install -y -qq"
-    PACKAGES=(gcc make curl git tcl tcl-dev)
+    PKG_INSTALL="${SUDO} apt-get update -qq && ${SUDO} apt-get install -y -qq"
+    # Eggdrop build deps + TLS
+    PACKAGES=(
+      gcc make
+      curl git
+      tcl tcl-dev
+      libssl-dev pkg-config
+      zlib1g-dev
+      ca-certificates
+      tar
+    )
   elif command -v dnf >/dev/null 2>&1; then
     SYSTEM="Fedora/RHEL"
-    PKG_INSTALL="sudo dnf install -y"
-    PACKAGES=(gcc make curl git tcl tcl-devel)
+    PKG_INSTALL="${SUDO} dnf install -y"
+    PACKAGES=(gcc make curl git tcl tcl-devel openssl-devel zlib-devel pkgconf-pkg-config ca-certificates tar)
   elif command -v yum >/dev/null 2>&1; then
     SYSTEM="CentOS/RHEL"
-    PKG_INSTALL="sudo yum install -y"
-    PACKAGES=(gcc make curl git tcl tcl-devel)
+    PKG_INSTALL="${SUDO} yum install -y"
+    PACKAGES=(gcc make curl git tcl tcl-devel openssl-devel zlib-devel pkgconfig ca-certificates tar)
   else
     die "No supported package manager found (apt-get/dnf/yum)."
   fi
@@ -129,19 +150,24 @@ download_and_build_eggdrop() {
     ohai "Using existing tarball: $tarball"
   fi
 
-  if [[ ! -d "$srcdir" ]]; then
-    ohai "Extracting..."
-    tar -zxf "$tarball"
-  else
-    warn "Source dir already exists: $srcdir (reusing it)."
+  # Clean source dir to avoid stale configure issues
+  if [[ -d "$srcdir" ]]; then
+    warn "Source dir already exists: $srcdir — cleaning it for a fresh build."
+    rm -rf "$srcdir"
   fi
+
+  ohai "Extracting..."
+  tar -zxf "$tarball"
 
   ohai "Building + installing to: $install_dir"
   pushd "$srcdir" >/dev/null
+
+  # TLS should work now because we installed openssl dev libs.
   ./configure --prefix="$install_dir" >/dev/null
   make config >/dev/null
   make -j"$(nproc 2>/dev/null || echo 1)" >/dev/null
   make install >/dev/null
+
   popd >/dev/null
 
   [[ -x "${install_dir}/eggdrop" ]] || die "Eggdrop build failed: ${install_dir}/eggdrop not found."
@@ -157,24 +183,20 @@ install_blacktools() {
 
   need_cmd git
   ensure_dir "${bot_dir}/scripts"
-  ensure_dir "${bot_dir}/scripts/_repo"
 
   # Clone/update into scripts/_repo
   if [[ -d "${bot_dir}/scripts/_repo/.git" ]]; then
     ohai "Updating BlackTools repo..."
     git -C "${bot_dir}/scripts/_repo" pull --ff-only >/dev/null || die "git pull failed"
   else
-    # if directory exists but not git, clear it
-    if [[ -d "${bot_dir}/scripts/_repo" ]]; then
-      rm -rf "${bot_dir}/scripts/_repo"
-    fi
+    rm -rf "${bot_dir}/scripts/_repo" 2>/dev/null || true
     ohai "Cloning BlackTools repo..."
     git clone "$repo_url" "${bot_dir}/scripts/_repo" >/dev/null || die "git clone failed"
   fi
 
-  # Auto-find a .tcl file (first match)
+  # Auto-find the first .tcl file (repo may change layout)
   local tcl_file=""
-  tcl_file="$(find "${bot_dir}/scripts/_repo" -maxdepth 5 -type f -name "*.tcl" | head -n 1 || true)"
+  tcl_file="$(find "${bot_dir}/scripts/_repo" -maxdepth 6 -type f -name "*.tcl" | head -n 1 || true)"
   [[ -n "$tcl_file" ]] || die "No .tcl file found inside repo: $repo_url"
 
   cp -f "$tcl_file" "${bot_dir}/scripts/${SCRIPT_TARGET_NAME}"
@@ -268,6 +290,7 @@ start_bot() {
 # Flows
 # --------------------------
 install_new() {
+  ensure_sudo
   detect_system
   install_prereqs
 
@@ -300,6 +323,7 @@ install_new() {
 }
 
 add_bot() {
+  ensure_sudo
   detect_system
   install_prereqs
 
@@ -334,6 +358,7 @@ add_bot() {
 }
 
 load_only() {
+  ensure_sudo
   detect_system
   install_prereqs
 
@@ -378,6 +403,7 @@ deploy_from_file() {
   local owner_v="${owner:-$(whoami)}"
   local repo_v="${script_repo:-$SCRIPT_REPO_DEFAULT}"
 
+  ensure_sudo
   detect_system
   install_prereqs
 
@@ -417,9 +443,6 @@ EOF
   exit 0
 }
 
-# --------------------------
-# Main
-# --------------------------
 case "${1:-}" in
   -h|--help) usage ;;
   -i) install_new ;;

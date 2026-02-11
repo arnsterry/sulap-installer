@@ -1,70 +1,71 @@
 #!/bin/bash
-# --- SulapRadio Custom BlackTools Installer ---
+# --- Sulap Radio BlackTools Installer (Fixed Version) ---
 
-# Text Formatting
+# Text Colors
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-ohai() { printf "${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$@"; }
-
-# 1. Start Header
 clear
 echo -e "${BLUE}==========================================${NC}"
-echo -e "${GREEN}   SULAP RADIO - BLACKTOOLS INSTALLER     ${NC}"
+echo -e "${GREEN}    SULAP RADIO CUSTOM INSTALLER          ${NC}"
 echo -e "${BLUE}==========================================${NC}"
-ohai "Detected Ubuntu System"
 
-# 2. Prerequisites (Armour Style)
-read -p "Do you wish to install prerequisite packages? (Y)es or (N)o: " precheck
-if [[ "$precheck" =~ ^[Yy]$ ]]; then
-    ohai "Installing dependencies..."
-    sudo apt-get update -qq
-    sudo apt-get install -y gcc make curl git tcl tcl-dev -qq
-fi
+# 1. Dependency Check (The part that caused the error)
+echo -e "${BLUE}==>${NC} Detected System: Ubuntu"
+echo -e "${BLUE}==>${NC} Installing dependencies..."
+sudo apt-get update -qq && sudo apt-get install -y gcc make curl git tcl tcl-dev -qq
 
-# 3. Interactive Config
-ohai "Bot Configuration"
-read -p "Enter Bot Name: " BOTNAME
+# 2. Interactive Questions
+echo -e "${BLUE}==>${NC} Configuration Settings"
+read -p "Enter Bot Nickname [sulap_bot]: " BOTNAME
+BOTNAME=${BOTNAME:-sulap_bot}
 read -p "Enter IRC Server [vancouver.bc.ca.undernet.org]: " SERVER
 SERVER=${SERVER:-vancouver.bc.ca.undernet.org}
-read -p "Enter Channel [#bislig]: " CHAN
-CHAN=${CHAN:-#bislig}
+read -p "Enter Home Channel [#bislig]: " HOMECHAN
+HOMECHAN=${HOMECHAN:-#bislig}
 
-# 4. Installation Logic
+# 3. Build Eggdrop
 BOTDIR="$HOME/$BOTNAME"
-ohai "Downloading Eggdrop 1.10.1..."
+echo -e "${BLUE}==>${NC} Building Eggdrop in $BOTDIR..."
 cd $HOME
 wget -q https://ftp.eggheads.org/pub/eggdrop/source/1.10/eggdrop-1.10.1.tar.gz
 tar -zxf eggdrop-1.10.1.tar.gz
 cd eggdrop-1.10.1
-
-ohai "Compiling Eggdrop (Please wait...)"
 ./configure --prefix=$BOTDIR >/dev/null 2>&1
 make config >/dev/null 2>&1
 make -j$(nproc) >/dev/null 2>&1
 make install >/dev/null 2>&1
 
-ohai "Installing BlackTools..."
+# 4. Install BlackTools
+echo -e "${BLUE}==>${NC} Cloning BlackTools from BlackShadow..."
 cd $BOTDIR
 git clone https://github.com/PHTLabs/BlackTools.git scripts/BlackTools >/dev/null
 cp scripts/BlackTools/BlackTools.tcl scripts/BlackTools.tcl
 
-# 5. Build Config
+# 5. Build the Config file
 cat > "$BOTNAME.conf" <<EOF
 set nick "$BOTNAME"
+set altnick "$BOTNAME-"
+set realname "https://sulapradio.com"
 set servers { $SERVER:6667 }
 loadmodule channels
 loadmodule server
 loadmodule irc
-channel add $CHAN
+channel add $HOMECHAN {
+  chanmode "+nt"
+  idle-kick 0
+}
 source eggdrop.conf
 source scripts/BlackTools.tcl
 EOF
 
-# 6. Shortcut
-echo "alias .egg='cd $BOTDIR && ./eggdrop -m $BOTNAME.conf'" >> ~/.bashrc
+# 6. Shortcut Alias
+# Check if alias already exists to avoid duplicates
+if ! grep -q ".egg" ~/.bashrc; then
+    echo "alias .egg='cd $BOTDIR && ./eggdrop -m $BOTNAME.conf'" >> ~/.bashrc
+fi
 
-echo -e "\n${GREEN}✅ INSTALL COMPLETE!${NC}"
-echo -e "Type ${BLUE}source ~/.bashrc${NC} then ${BLUE}.egg${NC} to start."
+echo -e "\n${GREEN}✅ INSTALLATION COMPLETE!${NC}"
+echo -e "Type ${BLUE}source ~/.bashrc${NC} then ${BLUE}.egg${NC} to start your bot."

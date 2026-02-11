@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
 # --------------------------------------------------------------------------------------------
-# Sulap Installer - Eggdrop + BlackTools + Botnet Hub/Spoke + Relay (Armour-inspired)
+# Sulap Installer - Eggdrop + BlackTools + Botnet Hub/Spoke + Relay (FIXED FOR curl | bash)
 # --------------------------------------------------------------------------------------------
-# Features:
-#   - Auto prerequisites (TLS compile deps included)
-#   - Multi-bot port registry (no collisions)
-#   - Backup/delete existing bot directory
-#   - Botnet hub/spoke auto-link
-#   - Pre-configured relay TCL over botnet
-#   - Auto firewall opening (ufw / firewalld)
-#
 # Usage:
-#   ./install.sh -i                     Install NEW bot
-#   ./install.sh -a                     Add bot under existing base dir
-#   ./install.sh -l                     Load BlackTools+Relay into existing bot config (optional rehash)
-#   ./install.sh -f <file> [-y]         Deploy from file (non-interactive); optional -y auto start
+#   ./install.sh -i [--yes]             Install NEW bot
+#   ./install.sh -a [--yes]             Add bot under existing base dir
+#   ./install.sh -l [--yes]             Load BlackTools+Relay into existing bot config
+#   ./install.sh -f <file> [-y]         Deploy from file; optional -y auto-start
 #   ./install.sh -h | --help            Help
+#
+# Run (recommended):
+#   curl -fsSL https://install.sulapradio.com/install.sh | bash -s -- -i
+#   curl -fsSL https://install.sulapradio.com/install.sh | bash -s -- -i --yes
 # --------------------------------------------------------------------------------------------
 
-set -u
-set -o pipefail
+set -euo pipefail
 shopt -s nocasematch
 
 # --------------------------
@@ -29,11 +24,9 @@ PROJECT_NAME="Sulap Installer"
 EGGDROP_VER="1.10.1"
 EGGDROP_URL="https://ftp.eggheads.org/pub/eggdrop/source/1.10/eggdrop-${EGGDROP_VER}.tar.gz"
 
-# BlackTools repo (your requested default)
 SCRIPT_REPO_DEFAULT="https://github.com/mrprogrammer2938/Black-Tool.git"
 SCRIPT_TARGET_NAME="BlackTools.tcl"
 
-# Relay TCL filename (we generate it)
 RELAY_TCL_NAME="sulap-relay.tcl"
 
 # --------------------------
@@ -41,17 +34,26 @@ RELAY_TCL_NAME="sulap-relay.tcl"
 # --------------------------
 DEFAULT_BASE_DIR="${HOME}/bots"
 DEFAULT_SERVER="vancouver.bc.ca.undernet.org"
-DEFAULT_PORT="6667"
+DEFAULT_IRC_PORT="6667"
 DEFAULT_CHAN="#bislig"
 DEFAULT_REALNAME="https://sulapradio.com"
 
-# Port range reserved by installer
 START_PORT=42420
 END_PORT=42519
 
-# Registry files (stored in base dir)
-PORT_REG_FILE=".sulap-ports.registry"     # botname port
-HUB_FILE=".sulap-hub"                      # hub_bot hub_port hub_ip
+PORT_REG_FILE=".sulap-ports.registry"  # "botname port"
+HUB_FILE=".sulap-hub"                  # "hub_bot hub_port hub_ip"
+
+# --------------------------
+# Parse flags (including --yes)
+# --------------------------
+AUTO_YES=0
+AUTO_START=0
+for a in "${@:-}"; do
+  case "$a" in
+    -y|--yes) AUTO_YES=1 ;;
+  esac
+done
 
 # --------------------------
 # TTY formatting
@@ -62,7 +64,6 @@ else
   tty_escape() { :; }
 fi
 tty_mkbold() { tty_escape "1;$1"; }
-tty_underline="$(tty_escape "4;39")"
 tty_red="$(tty_mkbold 31)"
 tty_green="$(tty_mkbold 32)"
 tty_yellow="$(tty_mkbold 33)"
@@ -70,84 +71,102 @@ tty_blue="$(tty_mkbold 34)"
 tty_bold="$(tty_mkbold 39)"
 tty_reset="$(tty_escape 0)"
 
-shell_join() {
-  local arg
-  printf "%s" "$1"
-  shift
-  for arg in "$@"; do
-    printf " %s" "${arg// /\ }"
-  done
-}
-
-ohai() { printf "${tty_blue}==>${tty_bold} %s${tty_reset}\n" "$(shell_join "$@")"; }
+ohai() { printf "${tty_blue}==>${tty_bold} %s${tty_reset}\n" "$*"; }
 warn() { printf "${tty_yellow}Warning${tty_reset}: %s\n" "$*" >&2; }
-ring_bell() { [[ -t 1 ]] && printf "\a"; }
+die()  { printf "${tty_red}Error${tty_reset}: %s\n" "$*" >&2; exit 1; }
 
-abort() {
-  ring_bell
-  printf "${tty_red}Error:${tty_reset} %s\n" "$*" >&2
-  exit 1
-}
-
-execute() {
-  if ! "$@"; then
-    abort "Failed during: $(shell_join "$@")"
-  fi
-}
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 
 # --------------------------
-# Read input even when piped (curl | bash)
+# Robust input helpers (FIXED FOR curl | bash)
 # --------------------------
-read_tty() {
+have_tty() { [[ -r /dev/tty ]]; }
+
+read_line_tty() {
+  # usage: read_line_tty VAR
   local __var="$1"
-  if [[ -r /dev/tty ]]; then
-    IFS= read -r "$__var" </dev/tty || true
+  local line=""
+  if have_tty; then
+    IFS= read -r line </dev/tty || true
   else
-    printf -v "$__var" ""
+    line=""
   fi
+  printf -v "$__var" "%s" "$line"
+}
+
+read_key_tty() {
+  # usage: read_key_tty VAR
+  local __var="$1"
+  local c=""
+  if have_tty; then
+    local save
+    save="$(stty -g </dev/tty 2>/dev/null || true)"
+    stty raw -echo </dev/tty 2>/dev/null || true
+    IFS= read -r -n 1 c </dev/tty 2>/dev/null || true
+    stty "$save" </dev/tty 2>/dev/null || true
+  else
+    c=""
+  fi
+  printf -v "$__var" "%s" "$c"
 }
 
 prompt_default() {
-  local prompt="$1"
+  # usage: prompt_default "Question" "default"
+  local q="$1"
   local def="$2"
-  local val=""
-  printf "%s [%s]: " "$prompt" "$def" >/dev/tty 2>/dev/null || true
-  read_tty val
-  if [[ -z "$val" ]]; then
-    printf "%s" "$def"
-  else
-    printf "%s" "$val"
+  local ans=""
+  if have_tty; then
+    printf "%s [%s]: " "$q" "$def" >/dev/tty
+    read_line_tty ans
   fi
+  if [[ -z "${ans}" ]]; then printf "%s" "$def"; else printf "%s" "$ans"; fi
 }
 
-getc() {
-  local save_state cvar
-  cvar="$1"
-  save_state="$(/bin/stty -g 2>/dev/null || true)"
-  /bin/stty raw -echo 2>/dev/null || true
-  IFS='' read -r -n 1 -d '' "$cvar" 2>/dev/null || true
-  /bin/stty "${save_state}" 2>/dev/null || true
+ask_yn() {
+  # usage: ask_yn "Question" default(Y/N)
+  # returns 0 for yes, 1 for no
+  local q="$1"
+  local def="${2:-Y}"
+  if [[ "$AUTO_YES" == "1" ]]; then
+    return 0
+  fi
+  if ! have_tty; then
+    # Non-interactive environment: default YES
+    return 0
+  fi
+  local c=""
+  printf "%s (%s/%s) [%s]: " "$q" "Y" "N" "$def" >/dev/tty
+  read_key_tty c
+  printf "\n" >/dev/tty
+  if [[ -z "$c" ]]; then c="$def"; fi
+  if [[ "$c" == "y" || "$c" == "Y" ]]; then return 0; else return 1; fi
 }
 
 wait_for_user() {
-  local c=""
   echo
-  echo "Press ${tty_bold}RETURN${tty_reset}/${tty_bold}ENTER${tty_reset} to begin, or any other key to abort:"
-  getc c
-  if ! [[ "${c}" == $'\r' || "${c}" == $'\n' ]]; then
-    exit 1
+  ohai "${tty_green}${PROJECT_NAME}${tty_reset}"
+  if [[ "$AUTO_YES" == "1" ]]; then
+    ohai "Auto-yes enabled; continuing..."
+    return 0
+  fi
+  if have_tty; then
+    echo "Press ${tty_bold}ENTER${tty_reset} to begin, or type anything then ENTER to abort:" >/dev/tty
+    local line=""
+    read_line_tty line
+    if [[ -n "$line" ]]; then
+      exit 1
+    fi
+  else
+    ohai "No TTY detected; continuing without prompt..."
   fi
 }
 
-need_cmd() { command -v "$1" >/dev/null 2>&1 || abort "Missing command: $1"; }
-
-ensure_dir() { [[ -d "$1" ]] || mkdir -p "$1"; }
-
 # --------------------------
-# sudo (ask once)
+# sudo (ask once, keep alive)
 # --------------------------
 SUDO="sudo"
 SUDO_KEEPALIVE_PID=""
+
 ensure_sudo() {
   if [[ "$(id -u)" -eq 0 ]]; then
     SUDO=""
@@ -155,59 +174,60 @@ ensure_sudo() {
   fi
   need_cmd sudo
   ohai "Requesting sudo (you may be prompted once)..."
-  sudo -v || abort "sudo authentication failed"
+  sudo -v || die "sudo authentication failed"
   ( while true; do sudo -n true 2>/dev/null || true; sleep 30; done ) &
   SUDO_KEEPALIVE_PID=$!
   trap '[[ -n "${SUDO_KEEPALIVE_PID}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null || true' EXIT
 }
 
 # --------------------------
-# OS + package manager
+# OS / package manager
 # --------------------------
 SYSTEM=""
 PKGMGR=""
 PKGMGR_ARGS=""
-PACKAGES=""
+PACKAGES=()
 
 detect_system() {
-  local os
-  os="$(uname -s)"
-  if [[ "$os" != "Linux" ]]; then
-    abort "This installer supports Linux only."
-  fi
+  [[ "$(uname -s)" == "Linux" ]] || die "Linux only (for now)."
 
   if command -v apt-get >/dev/null 2>&1; then
     SYSTEM="Debian/Ubuntu"
     PKGMGR="apt-get"
     PKGMGR_ARGS="install -y -qq"
-    PACKAGES="gcc make curl git tcl tcl-dev libssl-dev pkg-config zlib1g-dev ca-certificates tar lsof"
+    PACKAGES=(
+      gcc make curl git tar ca-certificates
+      tcl tcl-dev
+      libssl-dev pkg-config zlib1g-dev
+      lsof
+    )
   elif command -v dnf >/dev/null 2>&1; then
     SYSTEM="Fedora/RHEL"
     PKGMGR="dnf"
     PKGMGR_ARGS="install -y"
-    PACKAGES="gcc make curl git tcl tcl-devel openssl-devel zlib-devel pkgconf-pkg-config ca-certificates tar lsof"
+    PACKAGES=(gcc make curl git tar ca-certificates tcl tcl-devel openssl-devel zlib-devel pkgconf-pkg-config lsof)
   elif command -v yum >/dev/null 2>&1; then
     SYSTEM="CentOS/RHEL"
     PKGMGR="yum"
     PKGMGR_ARGS="install -y"
-    PACKAGES="gcc make curl git tcl tcl-devel openssl-devel zlib-devel pkgconfig ca-certificates tar lsof"
+    PACKAGES=(gcc make curl git tar ca-certificates tcl tcl-devel openssl-devel zlib-devel pkgconfig lsof)
   else
-    abort "No supported package manager found (apt-get/dnf/yum)."
+    die "No supported package manager found (apt-get/dnf/yum)."
   fi
 }
 
 install_prereqs() {
   ensure_sudo
-  ohai "Installing prerequisites..."
+  ohai "Detected ${SYSTEM}. Installing prerequisites..."
   if [[ "$PKGMGR" == "apt-get" ]]; then
-    execute ${SUDO} apt-get update -qq
+    ${SUDO} apt-get update -qq
   fi
-  execute ${SUDO} ${PKGMGR} ${PKGMGR_ARGS} ${PACKAGES}
+  ${SUDO} ${PKGMGR} ${PKGMGR_ARGS} "${PACKAGES[@]}"
   ohai "Done."
 }
 
 # --------------------------
-# IP + Port management
+# Networking helpers
 # --------------------------
 getIPv4() {
   if command -v ip >/dev/null 2>&1; then
@@ -226,27 +246,19 @@ port_in_use() {
   fi
 }
 
-registry_path() {
-  local base_dir="$1"
-  printf "%s/%s" "$base_dir" "$PORT_REG_FILE"
-}
-
-hub_path() {
-  local base_dir="$1"
-  printf "%s/%s" "$base_dir" "$HUB_FILE"
-}
+registry_path() { printf "%s/%s" "$1" "$PORT_REG_FILE"; }
+hub_path()      { printf "%s/%s" "$1" "$HUB_FILE"; }
 
 reserve_port() {
   local base_dir="$1"
   local botname="$2"
-  local reg
-  reg="$(registry_path "$base_dir")"
-  ensure_dir "$base_dir"
+  local reg; reg="$(registry_path "$base_dir")"
+  mkdir -p "$base_dir"
   [[ -f "$reg" ]] || : > "$reg"
 
-  # if already reserved for bot, reuse it
+  # reuse if already reserved
   local existing=""
-  existing="$(awk -v b="$botname" '$1==b {print $2}' "$reg" 2>/dev/null | head -n 1 || true)"
+  existing="$(awk -v b="$botname" '$1==b {print $2}' "$reg" | head -n 1 || true)"
   if [[ -n "$existing" ]]; then
     printf "%s" "$existing"
     return 0
@@ -254,11 +266,9 @@ reserve_port() {
 
   local port
   for ((port=START_PORT; port<=END_PORT; port++)); do
-    # skip if already reserved
     if awk -v p="$port" '$2==p {found=1} END{exit found?0:1}' "$reg" 2>/dev/null; then
       continue
     fi
-    # skip if in use
     if port_in_use "$port"; then
       continue
     fi
@@ -267,7 +277,7 @@ reserve_port() {
     return 0
   done
 
-  abort "No free port found in range ${START_PORT}-${END_PORT}"
+  die "No free port found in range ${START_PORT}-${END_PORT}"
 }
 
 # --------------------------
@@ -279,19 +289,52 @@ open_firewall_port() {
 
   if command -v ufw >/dev/null 2>&1; then
     ohai "Opening firewall with UFW: allow ${port}/tcp (${label})"
-    # Allow only TCP
-    execute ${SUDO} ufw allow "${port}/tcp" || warn "ufw allow failed"
+    ${SUDO} ufw allow "${port}/tcp" >/dev/null 2>&1 || warn "ufw allow failed"
     return 0
   fi
 
   if command -v firewall-cmd >/dev/null 2>&1; then
     ohai "Opening firewall with firewalld: add-port ${port}/tcp (${label})"
-    execute ${SUDO} firewall-cmd --permanent --add-port="${port}/tcp" || warn "firewalld add-port failed"
-    execute ${SUDO} firewall-cmd --reload || warn "firewalld reload failed"
+    ${SUDO} firewall-cmd --permanent --add-port="${port}/tcp" >/dev/null 2>&1 || warn "firewalld add-port failed"
+    ${SUDO} firewall-cmd --reload >/dev/null 2>&1 || warn "firewalld reload failed"
     return 0
   fi
 
-  warn "No UFW/firewalld detected. Please open TCP port ${port} manually if needed."
+  warn "No ufw/firewalld detected. Open TCP ${port} manually if needed."
+}
+
+# --------------------------
+# Backup/delete existing bot directory
+# --------------------------
+handle_existing_botdir() {
+  local bot_dir="$1"
+  [[ -d "$bot_dir" ]] || return 0
+
+  warn "Directory already exists: $bot_dir"
+  if [[ "$AUTO_YES" == "1" ]]; then
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    mv "$bot_dir" "${bot_dir}-backup-${ts}"
+    ohai "Auto-yes: backed up to ${bot_dir}-backup-${ts}"
+    return 0
+  fi
+
+  if ! have_tty; then
+    die "Existing directory found but no TTY to ask. Re-run with --yes or delete/rename it: $bot_dir"
+  fi
+
+  echo "Choose: (D)elete  (B)ackup  (E)xit" >/dev/tty
+  local c=""
+  read_key_tty c
+  echo >/dev/tty
+  case "$c" in
+    d|D) rm -rf "$bot_dir" ;;
+    b|B)
+      local ts; ts="$(date +%Y%m%d-%H%M%S)"
+      mv "$bot_dir" "${bot_dir}-backup-${ts}"
+      ohai "Backed up to ${bot_dir}-backup-${ts}"
+      ;;
+    *) die "Aborted." ;;
+  esac
 }
 
 # --------------------------
@@ -303,35 +346,37 @@ download_and_build_eggdrop() {
   need_cmd make
   need_cmd gcc
 
+  local install_dir="$1"
   local tarball="eggdrop-${EGGDROP_VER}.tar.gz"
   local srcdir="eggdrop-${EGGDROP_VER}"
-  local install_dir="$1"
 
   ohai "Preparing Eggdrop ${EGGDROP_VER}..."
+
   if [[ ! -f "$tarball" ]]; then
     ohai "Downloading ${EGGDROP_URL}"
-    execute curl -L --progress-bar -o "$tarball" "$EGGDROP_URL"
+    curl -L --progress-bar -o "$tarball" "$EGGDROP_URL"
   else
     ohai "Using existing tarball: $tarball"
   fi
 
+  # Always clean source dir to avoid stale configure cache
   if [[ -d "$srcdir" ]]; then
-    warn "Source dir exists: $srcdir — cleaning for fresh build."
+    warn "Source dir exists: $srcdir — cleaning for a fresh build."
     rm -rf "$srcdir"
   fi
 
   ohai "Extracting..."
-  execute tar -zxf "$tarball"
+  tar -zxf "$tarball"
 
-  ohai "Building + installing to: ${tty_green}${install_dir}${tty_reset}"
+  ohai "Building + installing to: $install_dir"
   pushd "$srcdir" >/dev/null
-  execute ./configure --prefix="$install_dir"
-  execute make config
-  execute make -j"$(nproc 2>/dev/null || echo 1)"
-  execute make install
+  ./configure --prefix="$install_dir" >/dev/null
+  make config >/dev/null
+  make -j"$(nproc 2>/dev/null || echo 1)" >/dev/null
+  make install >/dev/null
   popd >/dev/null
 
-  [[ -x "${install_dir}/eggdrop" ]] || abort "Eggdrop install failed: ${install_dir}/eggdrop not found."
+  [[ -x "${install_dir}/eggdrop" ]] || die "Eggdrop build failed: ${install_dir}/eggdrop not found."
   ohai "Eggdrop installed."
 }
 
@@ -342,182 +387,113 @@ install_blacktools() {
   local bot_dir="$1"
   local repo_url="$2"
   need_cmd git
-
-  ensure_dir "${bot_dir}/scripts"
+  mkdir -p "${bot_dir}/scripts"
 
   if [[ -d "${bot_dir}/scripts/_repo/.git" ]]; then
     ohai "Updating BlackTools repo..."
-    execute git -C "${bot_dir}/scripts/_repo" pull --ff-only
+    git -C "${bot_dir}/scripts/_repo" pull --ff-only >/dev/null || die "git pull failed"
   else
     rm -rf "${bot_dir}/scripts/_repo" 2>/dev/null || true
     ohai "Cloning BlackTools repo..."
-    execute git clone "$repo_url" "${bot_dir}/scripts/_repo"
+    git clone "$repo_url" "${bot_dir}/scripts/_repo" >/dev/null || die "git clone failed"
   fi
 
   local tcl_file=""
   tcl_file="$(find "${bot_dir}/scripts/_repo" -maxdepth 6 -type f -name "*.tcl" | head -n 1 || true)"
-  [[ -n "$tcl_file" ]] || abort "No .tcl file found inside repo: $repo_url"
+  [[ -n "$tcl_file" ]] || die "No .tcl file found inside repo: $repo_url"
 
-  execute cp -f "$tcl_file" "${bot_dir}/scripts/${SCRIPT_TARGET_NAME}"
-  ohai "Installed script -> ${tty_green}${bot_dir}/scripts/${SCRIPT_TARGET_NAME}${tty_reset}"
+  cp -f "$tcl_file" "${bot_dir}/scripts/${SCRIPT_TARGET_NAME}"
+  ohai "Installed: ${bot_dir}/scripts/${SCRIPT_TARGET_NAME}"
 }
 
 # --------------------------
-# Relay TCL generator (pre-configured botnet relay)
+# Relay TCL generator
 # --------------------------
 write_relay_tcl() {
   local bot_dir="$1"
-  local botname="$2"
-
-  ensure_dir "${bot_dir}/scripts"
+  mkdir -p "${bot_dir}/scripts"
 
   cat > "${bot_dir}/scripts/${RELAY_TCL_NAME}" <<'EOF'
-# --------------------------------------------------------------------------------------------
-# sulap-relay.tcl - Simple botnet relay helper (hub/spoke friendly)
-#
-# Usage (from channel by +m/+n users):
-#   !relay #channel message...
-#
-# What it does:
-#   - Sends relay request to all linked bots via putbot
-#   - Bots receiving it will say the message to the channel
-#
-# Notes:
-#   - Requires botnet links between bots.
-#   - Uses a simple botnet command token: "SULAP_RELAY"
-# --------------------------------------------------------------------------------------------
-
+# sulap-relay.tcl - Botnet relay helper
+# Public usage (requires +m/+n): !relay #channel message...
 set sulap_relay(cmdchar) "!"
 set sulap_relay(flags) "mn|-"
 
-bind pub  $sulap_relay(flags) "relay" sulap:relay_pub
-bind bot  - "SULAP_RELAY"      sulap:relay_bot
+bind pub $sulap_relay(flags) "relay" sulap:relay_pub
+bind bot - "SULAP_RELAY" sulap:relay_bot
 
 proc sulap:relay_pub {nick uhost hand chan text} {
-    if {[llength $text] < 2} {
-        putserv "PRIVMSG $chan :Usage: $::sulap_relay(cmdchar)relay #channel message..."
-        return
-    }
-    set tgt [lindex $text 0]
-    set msg [join [lrange $text 1 end] " "]
-
-    # Send to all linked bots (including hub/spokes)
-    foreach b [bots] {
-        putbot $b "SULAP_RELAY $tgt $nick $msg"
-    }
-
-    # Also echo locally
-    putserv "PRIVMSG $tgt :[format {[%s] %s} $nick $msg]"
+  if {[llength $text] < 2} {
+    putserv "PRIVMSG $chan :Usage: $::sulap_relay(cmdchar)relay #channel message..."
+    return
+  }
+  set tgt [lindex $text 0]
+  set msg [join [lrange $text 1 end] " "]
+  foreach b [bots] {
+    putbot $b "SULAP_RELAY $tgt $nick $msg"
+  }
+  putserv "PRIVMSG $tgt :[format {[%s] %s} $nick $msg]"
 }
 
 proc sulap:relay_bot {frombot cmd text} {
-    # text: <#chan> <nick> <message...>
-    if {[llength $text] < 3} { return }
-    set tgt  [lindex $text 0]
-    set nick [lindex $text 1]
-    set msg  [join [lrange $text 2 end] " "]
-    putserv "PRIVMSG $tgt :[format {[%s] %s} $nick $msg]"
+  if {[llength $text] < 3} { return }
+  set tgt  [lindex $text 0]
+  set nick [lindex $text 1]
+  set msg  [join [lrange $text 2 end] " "]
+  putserv "PRIVMSG $tgt :[format {[%s] %s} $nick $msg]"
 }
 
 putlog "sulap-relay.tcl loaded."
 EOF
-
-  ohai "Installed relay -> ${tty_green}${bot_dir}/scripts/${RELAY_TCL_NAME}${tty_reset}"
+  ohai "Installed: ${bot_dir}/scripts/${RELAY_TCL_NAME}"
 }
 
 # --------------------------
-# Backup/delete existing bot directory
-# --------------------------
-handle_existing_botdir() {
-  local bot_dir="$1"
-  if [[ ! -d "$bot_dir" ]]; then
-    return 0
-  fi
-
-  ring_bell
-  echo
-  warn "Directory already exists: ${bot_dir}"
-  echo
-  ohai "Do you wish to (${tty_green}D${tty_reset})elete, (${tty_green}B${tty_reset})ackup, or (${tty_green}E${tty_reset})xit?"
-  local input=""
-  getc input
-  if [[ "${input}" == "e" ]]; then
-    abort "Installation halted by user."
-  elif [[ "${input}" == "d" ]]; then
-    execute rm -rf "$bot_dir"
-  elif [[ "${input}" == "b" ]]; then
-    local ts
-    ts="$(date +%Y%m%d-%H%M%S)"
-    execute mv "$bot_dir" "${bot_dir}-backup-${ts}"
-    ohai "Backed up to: ${tty_green}${bot_dir}-backup-${ts}${tty_reset}"
-  else
-    handle_existing_botdir "$bot_dir"
-  fi
-}
-
-# --------------------------
-# Botnet hub/spoke config helpers
+# Hub storage / retrieval
 # --------------------------
 set_hub() {
-  local base_dir="$1"
-  local hub_bot="$2"
-  local hub_port="$3"
-  local hub_ip="$4"
-  local hubfile
-  hubfile="$(hub_path "$base_dir")"
-  printf "%s %s %s\n" "$hub_bot" "$hub_port" "$hub_ip" > "$hubfile"
-  ohai "Hub saved: ${tty_green}${hub_bot}${tty_reset} @ ${tty_green}${hub_ip}:${hub_port}${tty_reset}"
+  local base_dir="$1" hub_bot="$2" hub_port="$3" hub_ip="$4"
+  printf "%s %s %s\n" "$hub_bot" "$hub_port" "$hub_ip" > "$(hub_path "$base_dir")"
 }
 
-get_hub() {
+get_hub_line() {
   local base_dir="$1"
-  local hubfile
-  hubfile="$(hub_path "$base_dir")"
-  if [[ -f "$hubfile" ]]; then
-    cat "$hubfile"
-  else
-    echo ""
-  fi
+  local f; f="$(hub_path "$base_dir")"
+  if [[ -f "$f" ]]; then cat "$f"; else echo ""; fi
 }
 
 # --------------------------
-# Config writer (Eggdrop + BlackTools + Relay + Botnet)
+# Config writer (Eggdrop + BlackTools + Relay + Botnet link)
 # --------------------------
 write_bot_config() {
   local base_dir="$1"
   local bot_dir="$2"
   local botname="$3"
-  local server="$4"
+  local irc_server="$4"
   local irc_port="$5"
   local channel="$6"
   local realname="$7"
   local username="$8"
   local owner="$9"
-  local is_hub="${10}"
-  local do_link="${11}"
+  local make_hub="${10}"
+  local link_to_hub="${11}"
 
   local cfg="${bot_dir}/${botname}.conf"
-  ohai "Writing config: ${tty_green}${cfg}${tty_reset}"
+  local listen_port; listen_port="$(reserve_port "$base_dir" "$botname")"
+  local ip4; ip4="$(getIPv4 || true)"
+  [[ -n "$ip4" ]] || ip4="127.0.0.1"
 
-  local listen_port
-  listen_port="$(reserve_port "$base_dir" "$botname")"
-
-  local ip4
-  ip4="$(getIPv4 || true)"
-
-  # Hub info for spokes
-  local hub_line=""
-  hub_line="$(get_hub "$base_dir")"
-  local hub_bot="" hub_port="" hub_ip=""
+  # read hub if exists
+  local hub_line hub_bot hub_port hub_ip
+  hub_line="$(get_hub_line "$base_dir")"
+  hub_bot=""; hub_port=""; hub_ip=""
   if [[ -n "$hub_line" ]]; then
-    hub_bot="$(echo "$hub_line" | awk '{print $1}')"
-    hub_port="$(echo "$hub_line" | awk '{print $2}')"
-    hub_ip="$(echo "$hub_line" | awk '{print $3}')"
+    hub_bot="$(awk '{print $1}' <<<"$hub_line")"
+    hub_port="$(awk '{print $2}' <<<"$hub_line")"
+    hub_ip="$(awk '{print $3}' <<<"$hub_line")"
   fi
 
-  # Botnet nick (must be unique)
-  local botnet_nick="${botname}"
-
+  ohai "Writing config: $cfg"
   cat > "$cfg" <<EOF
 # --- Generated by Sulap Installer ---
 set nick "$botname"
@@ -528,34 +504,24 @@ set realname "$realname"
 set owner "$owner"
 set admin "$owner"
 
-# IRC server list
-set servers { $server:$irc_port }
+set servers { $irc_server:$irc_port }
 
-# Modules
 loadmodule server
 loadmodule channels
 loadmodule irc
 
-# ---------------------------
-# BOTNET / LINKING
-# ---------------------------
-# Botnet nick (unique per bot)
-set botnet-nick "$botnet_nick"
-# User shown in botnet
+# Botnet nick must be unique
+set botnet-nick "$botname"
 set botnet-user "$owner"
 
-# Listen port used for botnet + partyline (DCC/telnet) - be careful exposing publicly
+# Listen port used for botnet + partyline
 listen $listen_port all
 
-# ---------------------------
-# CHANNELS
-# ---------------------------
 channel add $channel {
   chanmode "+nt"
   idle-kick 0
 }
 
-# Default eggdrop base config
 source eggdrop.conf
 
 # BlackTools + Relay
@@ -563,66 +529,47 @@ source scripts/${SCRIPT_TARGET_NAME}
 source scripts/${RELAY_TCL_NAME}
 EOF
 
-  ohai "Reserved listen port: ${tty_green}${listen_port}${tty_reset}"
-
-  # Save hub if requested
-  if [[ "$is_hub" == "1" ]]; then
-    # Prefer public-ish IP (detected IPv4); if empty, fallback to 127.0.0.1
-    if [[ -z "${ip4:-}" ]]; then ip4="127.0.0.1"; fi
+  if [[ "$make_hub" == "1" ]]; then
     set_hub "$base_dir" "$botname" "$listen_port" "$ip4"
+    ohai "Set HUB: $botname @ $ip4:$listen_port"
   fi
 
-  # Link to hub if requested and hub exists
-  if [[ "$do_link" == "1" && -n "$hub_bot" && -n "$hub_port" && -n "$hub_ip" ]]; then
-    if [[ "$hub_bot" != "$botname" ]]; then
-      cat >> "$cfg" <<EOF
+  if [[ "$link_to_hub" == "1" && -n "$hub_bot" && "$hub_bot" != "$botname" ]]; then
+    cat >> "$cfg" <<EOF
 
 # Auto-link to hub
-# NOTE: Ensure hub's firewall allows inbound TCP on hub_port
 link "$hub_bot" "$hub_ip" "$hub_port"
 EOF
-      ohai "Added link to hub: ${tty_green}${hub_bot}${tty_reset} @ ${tty_green}${hub_ip}:${hub_port}${tty_reset}"
-    fi
+    ohai "Linked to HUB: $hub_bot @ $hub_ip:$hub_port"
   fi
 
-  # Offer firewall opening for this bot's listen port
-  echo
-  ohai "Open firewall for bot listen port ${tty_green}${listen_port}/tcp${tty_reset}? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-  local fw=""
-  getc fw
-  if [[ "${fw}" == "y" ]]; then
+  ohai "Reserved listen port: $listen_port"
+
+  # Firewall open prompt
+  if ask_yn "Open firewall for TCP ${listen_port} (eggdrop-${botname})?" "Y"; then
     ensure_sudo
     open_firewall_port "$listen_port" "eggdrop-${botname}"
   else
-    warn "Firewall not modified. If linking bots across servers, open TCP ${listen_port} on the HUB."
+    warn "Firewall not modified. If linking across servers, open TCP ${listen_port} on the HUB."
   fi
 
-  # Helpful summary
   echo
-  if [[ -n "${ip4:-}" ]]; then
-    ohai "Partyline (if exposed): ${tty_green}telnet ${ip4} ${listen_port}${tty_reset}"
-  fi
+  ohai "Partyline (if exposed): telnet ${ip4} ${listen_port}"
 }
 
 append_loaders_to_existing_config() {
   local cfg="$1"
-  [[ -f "$cfg" ]] || abort "Config not found: $cfg"
-
+  [[ -f "$cfg" ]] || die "Config not found: $cfg"
   local bt="source scripts/${SCRIPT_TARGET_NAME}"
   local rl="source scripts/${RELAY_TCL_NAME}"
 
   if ! grep -Fq "$bt" "$cfg"; then
-    echo -e "\n# BlackTools\n${bt}" >> "$cfg"
+    printf "\n# BlackTools\n%s\n" "$bt" >> "$cfg"
     ohai "Added BlackTools loader"
-  else
-    ohai "BlackTools already loaded"
   fi
-
   if ! grep -Fq "$rl" "$cfg"; then
-    echo -e "\n# Sulap Relay\n${rl}" >> "$cfg"
+    printf "\n# Sulap Relay\n%s\n" "$rl" >> "$cfg"
     ohai "Added relay loader"
-  else
-    ohai "Relay already loaded"
   fi
 }
 
@@ -631,8 +578,8 @@ append_loaders_to_existing_config() {
 # --------------------------
 start_bot() {
   local bot_dir="$1" botname="$2"
-  [[ -x "${bot_dir}/eggdrop" ]] || abort "eggdrop binary not found in $bot_dir"
-  [[ -f "${bot_dir}/${botname}.conf" ]] || abort "Config not found: ${bot_dir}/${botname}.conf"
+  [[ -x "${bot_dir}/eggdrop" ]] || die "eggdrop binary not found in $bot_dir"
+  [[ -f "${bot_dir}/${botname}.conf" ]] || die "Config not found: ${bot_dir}/${botname}.conf"
 
   ohai "Starting eggdrop..."
   pushd "$bot_dir" >/dev/null
@@ -651,10 +598,10 @@ rehash_if_running() {
   local pid=""
   pid="$(pgrep -af "eggdrop.*${botname}\.conf" | awk '{print $1}' | head -n 1 || true)"
   if [[ -n "$pid" ]]; then
-    ohai "Rehashing eggdrop (PID ${tty_green}${pid}${tty_reset})..."
+    ohai "Rehashing (HUP) PID $pid..."
     kill -HUP "$pid" || warn "Rehash failed"
   else
-    warn "Bot not detected running; restart manually to load changes."
+    warn "Bot not detected running; restart manually."
   fi
 }
 
@@ -662,78 +609,57 @@ rehash_if_running() {
 # Flows
 # --------------------------
 install_new() {
-  echo
-  ohai "${tty_green}${PROJECT_NAME}${tty_reset}"
   wait_for_user
-
   detect_system
-  ohai "Detected ${tty_green}${SYSTEM}${tty_reset}"
 
-  # auto prerequisites like Armour style (ask once; default yes)
-  echo
-  ohai "Install prerequisites automatically? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-  local inp=""
-  getc inp
-  if [[ "${inp}" != "n" ]]; then
+  if ask_yn "Install prerequisites automatically?" "Y"; then
     install_prereqs
   else
-    warn "Skipping prerequisites. Build may fail if deps are missing."
+    warn "Skipping prerequisites; build may fail."
   fi
 
   local base_dir botname server irc_port channel realname username owner repo bot_dir
   base_dir="$(prompt_default "Eggdrop base dir" "$DEFAULT_BASE_DIR")"
   botname="$(prompt_default "Bot nickname" "sulap_bot")"
   server="$(prompt_default "IRC server" "$DEFAULT_SERVER")"
-  irc_port="$(prompt_default "IRC port" "$DEFAULT_PORT")"
+  irc_port="$(prompt_default "IRC port" "$DEFAULT_IRC_PORT")"
   channel="$(prompt_default "Home channel" "$DEFAULT_CHAN")"
   realname="$(prompt_default "Realname" "$DEFAULT_REALNAME")"
   username="$(prompt_default "Ident/username" "$(whoami)")"
   owner="$(prompt_default "Owner name/handle" "$(whoami)")"
   repo="$(prompt_default "BlackTools repo URL" "$SCRIPT_REPO_DEFAULT")"
 
-  ensure_dir "$base_dir"
+  mkdir -p "$base_dir"
   bot_dir="${base_dir}/${botname}"
-
   handle_existing_botdir "$bot_dir"
-  ensure_dir "$bot_dir"
+  mkdir -p "$bot_dir"
 
-  # Hub/spoke choice
-  local is_hub="0"
-  local do_link="0"
-
+  # Hub/spoke selection
+  local make_hub="0"
+  local link_to_hub="0"
   local hub_line
-  hub_line="$(get_hub "$base_dir")"
+  hub_line="$(get_hub_line "$base_dir")"
   if [[ -z "$hub_line" ]]; then
-    echo
-    ohai "No hub found in ${tty_green}${base_dir}${tty_reset}. Make this bot the HUB? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-    local h=""
-    getc h
-    if [[ "$h" == "y" ]]; then
-      is_hub="1"
-      do_link="0"
+    if ask_yn "No HUB found. Make this bot the HUB?" "Y"; then
+      make_hub="1"
     fi
   else
-    echo
-    ohai "Hub found. Link this bot to hub automatically? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-    local l=""
-    getc l
-    if [[ "$l" == "y" ]]; then
-      do_link="1"
+    if ask_yn "HUB found. Link this bot to HUB automatically?" "Y"; then
+      link_to_hub="1"
     fi
   fi
 
   download_and_build_eggdrop "$bot_dir"
   install_blacktools "$bot_dir" "$repo"
-  write_relay_tcl "$bot_dir" "$botname"
-  write_bot_config "$base_dir" "$bot_dir" "$botname" "$server" "$irc_port" "$channel" "$realname" "$username" "$owner" "$is_hub" "$do_link"
+  write_relay_tcl "$bot_dir"
+  write_bot_config "$base_dir" "$bot_dir" "$botname" "$server" "$irc_port" "$channel" "$realname" "$username" "$owner" "$make_hub" "$link_to_hub"
 
-  echo
   ohai "${tty_green}Installation complete!${tty_reset}"
   echo "Start:"
-  echo "  ${tty_blue}cd \"$bot_dir\" && ./eggdrop -m \"${botname}.conf\"${tty_reset}"
+  echo "  cd \"$bot_dir\" && ./eggdrop -m \"${botname}.conf\""
   echo
-  echo "Relay usage (in channel):"
-  echo "  ${tty_green}!relay #channel message...${tty_reset}"
+  echo "Relay usage in channel:"
+  echo "  !relay #channel message..."
 }
 
 add_bot() {
@@ -742,11 +668,11 @@ add_bot() {
 
   local base_dir botname server irc_port channel realname username owner repo bot_dir
   base_dir="$(prompt_default "Existing base dir" "$DEFAULT_BASE_DIR")"
-  [[ -d "$base_dir" ]] || abort "Base dir not found: $base_dir"
+  [[ -d "$base_dir" ]] || die "Base dir not found: $base_dir"
 
   botname="$(prompt_default "New bot nickname" "sulap_bot2")"
   server="$(prompt_default "IRC server" "$DEFAULT_SERVER")"
-  irc_port="$(prompt_default "IRC port" "$DEFAULT_PORT")"
+  irc_port="$(prompt_default "IRC port" "$DEFAULT_IRC_PORT")"
   channel="$(prompt_default "Home channel" "$DEFAULT_CHAN")"
   realname="$(prompt_default "Realname" "$DEFAULT_REALNAME")"
   username="$(prompt_default "Ident/username" "$(whoami)")"
@@ -755,23 +681,14 @@ add_bot() {
 
   bot_dir="${base_dir}/${botname}"
   handle_existing_botdir "$bot_dir"
-  ensure_dir "$bot_dir"
+  mkdir -p "$bot_dir"
 
-  # hub exists? link it
-  local do_link="0"
-  local is_hub="0"
-  if [[ -n "$(get_hub "$base_dir")" ]]; then
-    echo
-    ohai "Hub found. Link this bot to hub automatically? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-    local l=""
-    getc l
-    [[ "$l" == "y" ]] && do_link="1"
+  local make_hub="0"
+  local link_to_hub="0"
+  if [[ -n "$(get_hub_line "$base_dir")" ]]; then
+    link_to_hub="1"
   else
-    echo
-    ohai "No hub found. Make this bot the HUB? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-    local h=""
-    getc h
-    [[ "$h" == "y" ]] && is_hub="1"
+    make_hub="1"
   fi
 
   if [[ ! -x "${bot_dir}/eggdrop" ]]; then
@@ -781,8 +698,8 @@ add_bot() {
   fi
 
   install_blacktools "$bot_dir" "$repo"
-  write_relay_tcl "$bot_dir" "$botname"
-  write_bot_config "$base_dir" "$bot_dir" "$botname" "$server" "$irc_port" "$channel" "$realname" "$username" "$owner" "$is_hub" "$do_link"
+  write_relay_tcl "$bot_dir"
+  write_bot_config "$base_dir" "$bot_dir" "$botname" "$server" "$irc_port" "$channel" "$realname" "$username" "$owner" "$make_hub" "$link_to_hub"
 
   ohai "${tty_green}Bot added!${tty_reset}"
 }
@@ -797,18 +714,14 @@ load_only() {
   repo="$(prompt_default "BlackTools repo URL" "$SCRIPT_REPO_DEFAULT")"
 
   cfg="${bot_dir}/${botname}.conf"
-  [[ -d "$bot_dir" ]] || abort "Bot directory not found: $bot_dir"
-  [[ -f "$cfg" ]] || abort "Config not found: $cfg"
+  [[ -d "$bot_dir" ]] || die "Bot directory not found: $bot_dir"
+  [[ -f "$cfg" ]] || die "Config not found: $cfg"
 
   install_blacktools "$bot_dir" "$repo"
-  write_relay_tcl "$bot_dir" "$botname"
+  write_relay_tcl "$bot_dir"
   append_loaders_to_existing_config "$cfg"
 
-  echo
-  ohai "Rehash bot now if running? (${tty_green}Y${tty_reset})es / (${tty_green}N${tty_reset})o"
-  local r=""
-  getc r
-  if [[ "$r" == "y" ]]; then
+  if ask_yn "Rehash bot now if running?" "Y"; then
     rehash_if_running "$botname"
   fi
 
@@ -818,11 +731,11 @@ load_only() {
 deploy_from_file() {
   local file="${1:-}"
   local flag="${2:-}"
-  [[ -n "$file" ]] || abort "Usage: ./install.sh -f <file> [-y]"
-  [[ -f "$file" ]] || abort "Deploy file not found: $file"
+  [[ -n "$file" ]] || die "Usage: ./install.sh -f <file> [-y]"
+  [[ -f "$file" ]] || die "Deploy file not found: $file"
 
   local launch=0
-  [[ "${flag:-}" == "-y" ]] && launch=1
+  [[ "$flag" == "-y" ]] && launch=1
 
   # shellcheck disable=SC1090
   source "$file"
@@ -831,7 +744,7 @@ deploy_from_file() {
 
   local base_dir="${install_dir:-$DEFAULT_BASE_DIR}"
   local server_v="${server:-$DEFAULT_SERVER}"
-  local port_v="${port:-$DEFAULT_PORT}"
+  local irc_port_v="${irc_port:-$DEFAULT_IRC_PORT}"
   local channel_v="${channel:-$DEFAULT_CHAN}"
   local realname_v="${realname:-$DEFAULT_REALNAME}"
   local username_v="${username:-$(whoami)}"
@@ -843,19 +756,18 @@ deploy_from_file() {
   detect_system
   install_prereqs
 
-  ensure_dir "$base_dir"
+  mkdir -p "$base_dir"
   local bot_dir="${base_dir}/${botname}"
   handle_existing_botdir "$bot_dir"
-  ensure_dir "$bot_dir"
+  mkdir -p "$bot_dir"
 
   if [[ ! -x "${bot_dir}/eggdrop" ]]; then
     download_and_build_eggdrop "$bot_dir"
   fi
 
   install_blacktools "$bot_dir" "$repo_v"
-  write_relay_tcl "$bot_dir" "$botname"
-
-  write_bot_config "$base_dir" "$bot_dir" "$botname" "$server_v" "$port_v" "$channel_v" "$realname_v" "$username_v" "$owner_v" "$make_hub" "$link_to_hub"
+  write_relay_tcl "$bot_dir"
+  write_bot_config "$base_dir" "$bot_dir" "$botname" "$server_v" "$irc_port_v" "$channel_v" "$realname_v" "$username_v" "$owner_v" "$make_hub" "$link_to_hub"
 
   ohai "Deployed: ${tty_green}${botname}${tty_reset} -> ${tty_green}${bot_dir}${tty_reset}"
   if [[ "$launch" -eq 1 ]]; then
@@ -864,30 +776,31 @@ deploy_from_file() {
 }
 
 usage() {
-  echo
-  echo "${PROJECT_NAME}"
-  echo "Usage: ./install.sh [options]"
-  echo "  -i                 Install NEW bot"
-  echo "  -a                 Add bot"
-  echo "  -l                 Load BlackTools+Relay on existing bot"
-  echo "  -f <file> [-y]     Deploy from file; optional -y auto-start"
-  echo "  -h, --help         Help"
-  echo
+  cat <<EOF
+
+${PROJECT_NAME}
+Usage:
+  ./install.sh -i [--yes]
+  ./install.sh -a [--yes]
+  ./install.sh -l [--yes]
+  ./install.sh -f <file> [-y]
+  ./install.sh -h | --help
+
+EOF
   exit 0
 }
 
 # --------------------------
 # Entry
 # --------------------------
-if [[ $# -gt 0 ]]; then
-  case "$1" in
-    -h|--help) usage ;;
-    -i) install_new ;;
-    -a) add_bot ;;
-    -l) load_only ;;
-    -f) deploy_from_file "${2:-}" "${3:-}" ;;
-    *) warn "Unknown option: $1"; usage ;;
-  esac
-else
-  usage
-fi
+case "${1:-}" in
+  -h|--help) usage ;;
+  -i) install_new ;;
+  -a) add_bot ;;
+  -l) load_only ;;
+  -f)
+    [[ $# -ge 2 ]] || die "Usage: ./install.sh -f <file> [-y]"
+    deploy_from_file "${2}" "${3:-}"
+    ;;
+  *) die "Unknown option: ${1:-<none>}. Use -h for help." ;;
+esac

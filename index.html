@@ -1,0 +1,70 @@
+#!/bin/bash
+# --- SulapRadio Custom BlackTools Installer ---
+
+# Text Formatting
+BLUE='\033[1;34m'
+GREEN='\033[1;32m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ohai() { printf "${BLUE}==>${NC} ${BOLD}%s${NC}\n" "$@"; }
+
+# 1. Start Header
+clear
+echo -e "${BLUE}==========================================${NC}"
+echo -e "${GREEN}   SULAP RADIO - BLACKTOOLS INSTALLER     ${NC}"
+echo -e "${BLUE}==========================================${NC}"
+ohai "Detected Ubuntu System"
+
+# 2. Prerequisites (Armour Style)
+read -p "Do you wish to install prerequisite packages? (Y)es or (N)o: " precheck
+if [[ "$precheck" =~ ^[Yy]$ ]]; then
+    ohai "Installing dependencies..."
+    sudo apt-get update -qq
+    sudo apt-get install -y gcc make curl git tcl tcl-dev -qq
+fi
+
+# 3. Interactive Config
+ohai "Bot Configuration"
+read -p "Enter Bot Name: " BOTNAME
+read -p "Enter IRC Server [vancouver.bc.ca.undernet.org]: " SERVER
+SERVER=${SERVER:-vancouver.bc.ca.undernet.org}
+read -p "Enter Channel [#bislig]: " CHAN
+CHAN=${CHAN:-#bislig}
+
+# 4. Installation Logic
+BOTDIR="$HOME/$BOTNAME"
+ohai "Downloading Eggdrop 1.10.1..."
+cd $HOME
+wget -q https://ftp.eggheads.org/pub/eggdrop/source/1.10/eggdrop-1.10.1.tar.gz
+tar -zxf eggdrop-1.10.1.tar.gz
+cd eggdrop-1.10.1
+
+ohai "Compiling Eggdrop (Please wait...)"
+./configure --prefix=$BOTDIR >/dev/null 2>&1
+make config >/dev/null 2>&1
+make -j$(nproc) >/dev/null 2>&1
+make install >/dev/null 2>&1
+
+ohai "Installing BlackTools..."
+cd $BOTDIR
+git clone https://github.com/PHTLabs/BlackTools.git scripts/BlackTools >/dev/null
+cp scripts/BlackTools/BlackTools.tcl scripts/BlackTools.tcl
+
+# 5. Build Config
+cat > "$BOTNAME.conf" <<EOF
+set nick "$BOTNAME"
+set servers { $SERVER:6667 }
+loadmodule channels
+loadmodule server
+loadmodule irc
+channel add $CHAN
+source eggdrop.conf
+source scripts/BlackTools.tcl
+EOF
+
+# 6. Shortcut
+echo "alias .egg='cd $BOTDIR && ./eggdrop -m $BOTNAME.conf'" >> ~/.bashrc
+
+echo -e "\n${GREEN}✅ INSTALL COMPLETE!${NC}"
+echo -e "Type ${BLUE}source ~/.bashrc${NC} then ${BLUE}.egg${NC} to start."
